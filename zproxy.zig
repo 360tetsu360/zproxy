@@ -1,11 +1,14 @@
 const std = @import("std");
 const mem = std.mem;
+const json = std.json;
 const thread = std.Thread;
 const network = @import("zig-network/network.zig");
 
 const DATAGRAM_FLAG: u8 = 0x80;
 const FRAGMENT_FLAG: u8 = 0x10;
 pub const HandleFn = fn () bool;
+
+const Mojang_pubkey : []const u8 = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAE8ELkixyLcwlZryUQcu1TvPOmI2B7vX83ndnWRUaXm74wFfa5f/lwQNTfrLVHa2PmenpGI6JhIMUJaWZrjmMj90NoKNFSNBuKdm8rYiXsfaz3K36x/1U26HpG0ZxK/V1V";
 
 // Packets ID
 const LoginPacket: u8 = 0x1;
@@ -99,6 +102,7 @@ fn handle_mcpe(data: []u8) !void {
 
         var packet = try decompressor.reader().readAllAlloc(allocator, len);
         defer allocator.free(packet);
+        std.debug.print("packet length : {!}\n", .{packet.len});
 
         var fixed_buffer = std.io.fixedBufferStream(packet);
         const cursor = fixed_buffer.reader();
@@ -107,12 +111,115 @@ fn handle_mcpe(data: []u8) !void {
             LoginPacket => {
                 const protocol_version = try cursor.readIntBig(u32);
                 const data_len = try read_var_u32(cursor);
-                std.debug.print("protocol version : {!}\ndata length {!}", .{protocol_version, data_len});
+                std.debug.print("protocol version : {!}\ndata lengrh : {!}\n",.{protocol_version,data_len});
+
+                const jwt_chain_len = try cursor.readIntLittle(u32);
+                std.debug.print("jwt chain length : {!}\n",.{jwt_chain_len});
+
+                const jwt_chain = try allocator.alloc(u8, jwt_chain_len);
+                defer allocator.free(jwt_chain);
+                std.debug.assert((try cursor.read(jwt_chain)) == jwt_chain_len);
+
+                const JwtChain = struct {
+                    chain: [][]u8
+                };
+
+                var jwts_ts = json.TokenStream.init(jwt_chain);
+                const jwts = try json.parse(JwtChain, &jwts_ts, .{.allocator = allocator});
+
+                for (jwts.chain) |jwt_str| {
+                    var jwt = try Jwt.init(jwt_str, allocator);
+                    defer jwt.deinit();
+
+                    if (jwt.extra_data != null) {
+                        std.debug.print("{s} logged in!\n", .{jwt.extra_data.?.display_name});
+                    }
+                }
             },
             else => unreachable,
         }
     }
 }
+
+// No verification. Because it's annoying.
+// We trust the clients we connect with.
+// TODO : verify
+const Jwt = struct {
+    pub const ExtraData = struct {
+        xuid : []const u8,
+        identity : []const u8,
+        display_name : []const u8,
+        title_id : []const u8,
+    };
+
+    allocator : mem.Allocator,
+    x5u : []const u8,
+    identity_public_key : []const u8,
+    extra_data : ?ExtraData,
+
+    const Self = @This();
+
+    pub fn init(str : []u8, allocator : std.mem.Allocator) !Self {
+        // Split token with '.'.
+        const header_end = mem.indexOfScalar(u8,str,'.').?;
+        const claims_end = mem.indexOfScalarPos(u8, str, header_end + 1, '.').?;
+
+        const header_b64 = str[0..header_end];
+        const claims_b64 = str[header_end + 1..claims_end];
+
+        // Decode token.
+        var header_json_str = try allocator.alloc(u8, try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(header_b64));
+        defer allocator.free(header_json_str);
+        try std.base64.url_safe_no_pad.Decoder.decode(header_json_str, header_b64);
+
+        var claims_json_str = try allocator.alloc(u8, try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(claims_b64));
+        defer allocator.free(claims_json_str);
+        try std.base64.url_safe_no_pad.Decoder.decode(claims_json_str, claims_b64);
+
+        // Parse strings to json.
+        var parser = json.Parser.init(allocator, false);
+        parser.deinit();
+
+        var parser2 = json.Parser.init(allocator, false);
+        parser2.deinit();
+
+        var header = try parser.parse(header_json_str);
+        defer header.deinit();
+        var claims = try parser2.parse(claims_json_str);
+        defer claims.deinit();
+
+        // Allocate memory and copy.
+        var x5u = try copy_string(header.root.Object.get("x5u").?.String, allocator);
+        var identity_public_key = try copy_string(claims.root.Object.get("identityPublicKey").?.String, allocator);
+
+        const extra = claims.root.Object.get("extraData");
+        const extra_data = if (extra != null) 
+            ExtraData {
+                .xuid = try copy_string(extra.?.Object.get("XUID").?.String, allocator),
+                .identity = try copy_string(extra.?.Object.get("identity").?.String, allocator),
+                .display_name = try copy_string(extra.?.Object.get("displayName").?.String, allocator),
+                .title_id = try copy_string(extra.?.Object.get("titleId").?.String, allocator),
+            } else null;
+
+        return Self {
+            .allocator = allocator,
+            .x5u = x5u,
+            .identity_public_key = identity_public_key,
+            .extra_data = extra_data
+        };
+    }
+
+    pub fn deinit(self : *Self) void {
+        self.allocator.free(self.x5u);
+        self.allocator.free(self.identity_public_key);
+        if (self.extra_data != null) {
+            self.allocator.free(self.extra_data.?.xuid);
+            self.allocator.free(self.extra_data.?.identity);
+            self.allocator.free(self.extra_data.?.display_name);
+            self.allocator.free(self.extra_data.?.title_id);
+        }
+    }
+};
 
 fn dialer_loop(dialer: *Dialer, listener: *Listener, handler: HandleFn) !void {
     //var dialer_seq = 0;
@@ -242,6 +349,13 @@ pub const Fragment = struct {
         return packet;
     }
 };
+
+// I don't know how to copy `[]const u8` with allocating memory.
+fn copy_string(src : []const u8, allocator : mem.Allocator) ![]u8 {
+    var dest = try allocator.alloc(u8, src.len);
+    mem.copy(u8, dest, src);
+    return dest;
+}
 
 fn read_big_u16(b: *[2]u8) u16 {
     return @as(u16, b[1]) | (@as(u16, b[0]) << 8);
