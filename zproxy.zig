@@ -1,6 +1,7 @@
 const std = @import("std");
 const mem = std.mem;
 const json = std.json;
+const P384 = std.crypto.ecc.P384;
 const thread = std.Thread;
 const network = @import("zig-network/network.zig");
 
@@ -133,6 +134,25 @@ fn handle_mcpe(data: []u8) !void {
 
                     if (jwt.extra_data != null) {
                         std.debug.print("{s} logged in!\n", .{jwt.extra_data.?.display_name});
+                        std.debug.print("pubkey : {s}\n", .{jwt.identity_public_key});
+
+                        const pubkey = try parse_pkix_key(jwt.identity_public_key);
+
+                        // Generate key
+                        const secret = P384.scalar.random(.Big);
+                        const our_pubkey = try P384.basePoint.mul(secret, .Big);
+
+                        // Exchange key
+                        const shared_secret = try pubkey.mul(secret, .Big);
+                        const shared_bytes = shared_secret.x.toBytes(.Big);
+
+                        std.debug.print("secret key : {any}\n", .{shared_bytes});
+
+                        const our_pubkey_der = encode_pkix_key(our_pubkey);
+                        var our_pubkey_pem : [160]u8 = [_]u8{0} ** 160;
+                        _ = std.base64.standard.Encoder.encode(our_pubkey_pem[0..160], &our_pubkey_der);
+
+                        std.debug.print("our public key : {s}\n", .{our_pubkey_pem});
                     }
                 }
             },
@@ -415,4 +435,31 @@ fn read_var_u64(reader : anytype) !u64 {
 
 fn read_var_u32(reader : anytype) !u32 {
     return zigzag_encode_32(try read_var_i32(reader));
+}
+
+// This is a terrible function to parse pkix key.
+// But it's fast and simple :).
+fn parse_pkix_key(pem : []const u8) !P384 {
+    var key : [120]u8 = [_]u8{0x0} ** 120;
+    try std.base64.standard.Decoder.decode(key[0..key.len], pem);
+    const identifier : [24]u8 = .{ 0x30, 0x76, 0x30, 0x10, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22, 0x03, 0x62, 0x00, 0x04 };
+    if (!mem.eql(u8, identifier[0..identifier.len] , key[0..24])) {
+        @panic("TODO : return error");
+    }
+
+    var x : [48]u8 = [_]u8{0x0} ** 48;
+    @memcpy(&x, key[24..72], 48);
+    var y : [48]u8 = [_]u8{0x0} ** 48;
+    @memcpy(&y, key[72..key.len], 48);
+    return try P384.fromSerializedAffineCoordinates(x, y, .Big);
+}
+
+// return der
+fn encode_pkix_key(key : P384) [120]u8 {
+    var der : [120]u8 = [_]u8{0x0} ** 120;
+    const identifier : [24]u8 = .{ 0x30, 0x76, 0x30, 0x10, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22, 0x03, 0x62, 0x00, 0x04 };
+    @memcpy(&der, &identifier, 24);
+    @memcpy(der[24..], &key.x.toBytes(.Big), 48);
+    @memcpy(der[72..], &key.y.toBytes(.Big), 48);
+    return der;
 }
