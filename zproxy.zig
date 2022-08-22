@@ -2,6 +2,7 @@ const std = @import("std");
 const mem = std.mem;
 const json = std.json;
 const P384 = std.crypto.ecc.P384;
+const EcdsaP384Sha384 = std.crypto.sign.ecdsa.EcdsaP384Sha384;
 const thread = std.Thread;
 const network = @import("zig-network/network.zig");
 
@@ -153,6 +154,55 @@ fn handle_mcpe(data: []u8) !void {
                         _ = std.base64.standard.Encoder.encode(our_pubkey_pem[0..160], &our_pubkey_der);
 
                         std.debug.print("our public key : {s}\n", .{our_pubkey_pem});
+
+                        const pem = our_pubkey_pem[0..160];
+
+                        // Now we send our token to target server.
+                        // We use the same key for listener and dialer.
+                        const xuid = jwt.extra_data.?.xuid;
+                        const display_name = jwt.extra_data.?.display_name;
+                        const identity = jwt.extra_data.?.identity;
+
+
+                        const urlsafe_nopad = std.base64.url_safe_no_pad;
+                        const header_json = try json.stringifyAlloc(allocator, .{
+                            .alg = "ES384",
+                            .x5u = pem,
+                        }, .{});
+
+                        const header_b64_len = urlsafe_nopad.Encoder.calcSize(header_json.len);
+                        defer allocator.free(header_json);
+
+                        const extra_data = .{
+                            .XUID = xuid,
+                            .displayName = display_name,
+                            .identity = identity
+                        };
+
+                        const claims_json = try json.stringifyAlloc(allocator, .{
+                            .exp = jwt.exp,
+                            .extraData = extra_data,
+                            .identityPublicKey = pem,
+                            .nbf = jwt.nbf,
+                        }, .{});
+                        const claims_b64_len = urlsafe_nopad.Encoder.calcSize(claims_json.len);
+                        defer allocator.free(claims_json);
+
+                        var jwt_dst = try allocator.alloc(u8, header_b64_len + claims_b64_len + urlsafe_nopad.Encoder.calcSize(96) + 2);
+                        defer allocator.free(jwt_dst);
+
+                        _ = urlsafe_nopad.Encoder.encode(jwt_dst, header_json);
+                        jwt_dst[header_b64_len] = '.';
+                        _ = urlsafe_nopad.Encoder.encode(jwt_dst[header_b64_len + 1..], claims_json);
+                        jwt_dst[header_b64_len + claims_b64_len + 1] = '.';
+
+                        const skey = try EcdsaP384Sha384.SecretKey.fromBytes(secret);
+                        const key_pair = try EcdsaP384Sha384.KeyPair.fromSecretKey(skey);
+                        const sign = try key_pair.sign(jwt_dst[header_b64_len + claims_b64_len + 1..], null);
+                        
+                        _ = urlsafe_nopad.Encoder.encode(jwt_dst[header_b64_len + claims_b64_len + 2..], sign.toBytes()[0..96]);
+
+                        std.debug.print("{s}\n", .{jwt_dst});
                     }
                 }
             },
@@ -176,6 +226,9 @@ const Jwt = struct {
     x5u : []const u8,
     identity_public_key : []const u8,
     extra_data : ?ExtraData,
+
+    nbf : i64,
+    exp : i64,
 
     const Self = @This();
 
@@ -221,11 +274,15 @@ const Jwt = struct {
                 .title_id = try copy_string(extra.?.Object.get("titleId").?.String, allocator),
             } else null;
 
+        const nbf = claims.root.Object.get("nbf").?.Integer;
+        const exp = claims.root.Object.get("exp").?.Integer;
         return Self {
             .allocator = allocator,
             .x5u = x5u,
             .identity_public_key = identity_public_key,
-            .extra_data = extra_data
+            .extra_data = extra_data,
+            .nbf = nbf,
+            .exp = exp
         };
     }
 
