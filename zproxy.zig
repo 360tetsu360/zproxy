@@ -10,7 +10,7 @@ const DATAGRAM_FLAG: u8 = 0x80;
 const FRAGMENT_FLAG: u8 = 0x10;
 pub const HandleFn = fn () bool;
 
-const Mojang_pubkey : []const u8 = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAE8ELkixyLcwlZryUQcu1TvPOmI2B7vX83ndnWRUaXm74wFfa5f/lwQNTfrLVHa2PmenpGI6JhIMUJaWZrjmMj90NoKNFSNBuKdm8rYiXsfaz3K36x/1U26HpG0ZxK/V1V";
+const Mojang_pubkey: []const u8 = "MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAE8ELkixyLcwlZryUQcu1TvPOmI2B7vX83ndnWRUaXm74wFfa5f/lwQNTfrLVHa2PmenpGI6JhIMUJaWZrjmMj90NoKNFSNBuKdm8rYiXsfaz3K36x/1U26HpG0ZxK/V1V";
 
 // Packets ID
 const LoginPacket: u8 = 0x1;
@@ -97,9 +97,9 @@ fn handle_mcpe(data: []u8) !void {
     defer decompressor.deinit();
 
     while (true) {
-        const len = read_var_u32(decompressor.reader()) catch |err| switch(err) {
+        const len = read_var_u32(decompressor.reader()) catch |err| switch (err) {
             error.EndOfStream => break,
-            else => return err
+            else => return err,
         };
 
         var packet = try decompressor.reader().readAllAlloc(allocator, len);
@@ -113,21 +113,19 @@ fn handle_mcpe(data: []u8) !void {
             LoginPacket => {
                 const protocol_version = try cursor.readIntBig(u32);
                 const data_len = try read_var_u32(cursor);
-                std.debug.print("protocol version : {!}\ndata lengrh : {!}\n",.{protocol_version,data_len});
+                std.debug.print("protocol version : {!}\ndata lengrh : {!}\n", .{ protocol_version, data_len });
 
                 const jwt_chain_len = try cursor.readIntLittle(u32);
-                std.debug.print("jwt chain length : {!}\n",.{jwt_chain_len});
+                std.debug.print("jwt chain length : {!}\n", .{jwt_chain_len});
 
                 const jwt_chain = try allocator.alloc(u8, jwt_chain_len);
                 defer allocator.free(jwt_chain);
                 std.debug.assert((try cursor.read(jwt_chain)) == jwt_chain_len);
 
-                const JwtChain = struct {
-                    chain: [][]u8
-                };
+                const JwtChain = struct { chain: [][]u8 };
 
                 var jwts_ts = json.TokenStream.init(jwt_chain);
-                const jwts = try json.parse(JwtChain, &jwts_ts, .{.allocator = allocator});
+                const jwts = try json.parse(JwtChain, &jwts_ts, .{ .allocator = allocator });
 
                 for (jwts.chain) |jwt_str| {
                     var jwt = try Jwt.init(jwt_str, allocator);
@@ -150,7 +148,7 @@ fn handle_mcpe(data: []u8) !void {
                         std.debug.print("secret key : {any}\n", .{shared_bytes});
 
                         const our_pubkey_der = encode_pkix_key(our_pubkey);
-                        var our_pubkey_pem : [160]u8 = [_]u8{0} ** 160;
+                        var our_pubkey_pem: [160]u8 = [_]u8{0} ** 160;
                         _ = std.base64.standard.Encoder.encode(our_pubkey_pem[0..160], &our_pubkey_der);
 
                         std.debug.print("our public key : {s}\n", .{our_pubkey_pem});
@@ -163,7 +161,6 @@ fn handle_mcpe(data: []u8) !void {
                         const display_name = jwt.extra_data.?.display_name;
                         const identity = jwt.extra_data.?.identity;
 
-
                         const urlsafe_nopad = std.base64.url_safe_no_pad;
                         const header_json = try json.stringifyAlloc(allocator, .{
                             .alg = "ES384",
@@ -173,11 +170,7 @@ fn handle_mcpe(data: []u8) !void {
                         const header_b64_len = urlsafe_nopad.Encoder.calcSize(header_json.len);
                         defer allocator.free(header_json);
 
-                        const extra_data = .{
-                            .XUID = xuid,
-                            .displayName = display_name,
-                            .identity = identity
-                        };
+                        const extra_data = .{ .XUID = xuid, .displayName = display_name, .identity = identity };
 
                         const claims_json = try json.stringifyAlloc(allocator, .{
                             .exp = jwt.exp,
@@ -193,14 +186,14 @@ fn handle_mcpe(data: []u8) !void {
 
                         _ = urlsafe_nopad.Encoder.encode(jwt_dst, header_json);
                         jwt_dst[header_b64_len] = '.';
-                        _ = urlsafe_nopad.Encoder.encode(jwt_dst[header_b64_len + 1..], claims_json);
+                        _ = urlsafe_nopad.Encoder.encode(jwt_dst[header_b64_len + 1 ..], claims_json);
                         jwt_dst[header_b64_len + claims_b64_len + 1] = '.';
 
                         const skey = try EcdsaP384Sha384.SecretKey.fromBytes(secret);
                         const key_pair = try EcdsaP384Sha384.KeyPair.fromSecretKey(skey);
-                        const sign = try key_pair.sign(jwt_dst[header_b64_len + claims_b64_len + 1..], null);
-                        
-                        _ = urlsafe_nopad.Encoder.encode(jwt_dst[header_b64_len + claims_b64_len + 2..], sign.toBytes()[0..96]);
+                        const sign = try key_pair.sign(jwt_dst[header_b64_len + claims_b64_len + 1 ..], null);
+
+                        _ = urlsafe_nopad.Encoder.encode(jwt_dst[header_b64_len + claims_b64_len + 2 ..], sign.toBytes()[0..96]);
 
                         std.debug.print("{s}\n", .{jwt_dst});
                     }
@@ -216,29 +209,29 @@ fn handle_mcpe(data: []u8) !void {
 // TODO : verify
 const Jwt = struct {
     pub const ExtraData = struct {
-        xuid : []const u8,
-        identity : []const u8,
-        display_name : []const u8,
-        title_id : []const u8,
+        xuid: []const u8,
+        identity: []const u8,
+        display_name: []const u8,
+        title_id: []const u8,
     };
 
-    allocator : mem.Allocator,
-    x5u : []const u8,
-    identity_public_key : []const u8,
-    extra_data : ?ExtraData,
+    allocator: mem.Allocator,
+    x5u: []const u8,
+    identity_public_key: []const u8,
+    extra_data: ?ExtraData,
 
-    nbf : i64,
-    exp : i64,
+    nbf: i64,
+    exp: i64,
 
     const Self = @This();
 
-    pub fn init(str : []u8, allocator : std.mem.Allocator) !Self {
+    pub fn init(str: []u8, allocator: std.mem.Allocator) !Self {
         // Split token with '.'.
-        const header_end = mem.indexOfScalar(u8,str,'.').?;
+        const header_end = mem.indexOfScalar(u8, str, '.').?;
         const claims_end = mem.indexOfScalarPos(u8, str, header_end + 1, '.').?;
 
         const header_b64 = str[0..header_end];
-        const claims_b64 = str[header_end + 1..claims_end];
+        const claims_b64 = str[header_end + 1 .. claims_end];
 
         // Decode token.
         var header_json_str = try allocator.alloc(u8, try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(header_b64));
@@ -266,27 +259,22 @@ const Jwt = struct {
         var identity_public_key = try copy_string(claims.root.Object.get("identityPublicKey").?.String, allocator);
 
         const extra = claims.root.Object.get("extraData");
-        const extra_data = if (extra != null) 
-            ExtraData {
+        const extra_data = if (extra != null)
+            ExtraData{
                 .xuid = try copy_string(extra.?.Object.get("XUID").?.String, allocator),
                 .identity = try copy_string(extra.?.Object.get("identity").?.String, allocator),
                 .display_name = try copy_string(extra.?.Object.get("displayName").?.String, allocator),
                 .title_id = try copy_string(extra.?.Object.get("titleId").?.String, allocator),
-            } else null;
+            }
+        else
+            null;
 
         const nbf = claims.root.Object.get("nbf").?.Integer;
         const exp = claims.root.Object.get("exp").?.Integer;
-        return Self {
-            .allocator = allocator,
-            .x5u = x5u,
-            .identity_public_key = identity_public_key,
-            .extra_data = extra_data,
-            .nbf = nbf,
-            .exp = exp
-        };
+        return Self{ .allocator = allocator, .x5u = x5u, .identity_public_key = identity_public_key, .extra_data = extra_data, .nbf = nbf, .exp = exp };
     }
 
-    pub fn deinit(self : *Self) void {
+    pub fn deinit(self: *Self) void {
         self.allocator.free(self.x5u);
         self.allocator.free(self.identity_public_key);
         if (self.extra_data != null) {
@@ -428,7 +416,7 @@ pub const Fragment = struct {
 };
 
 // I don't know how to copy `[]const u8` with allocating memory.
-fn copy_string(src : []const u8, allocator : mem.Allocator) ![]u8 {
+fn copy_string(src: []const u8, allocator: mem.Allocator) ![]u8 {
     var dest = try allocator.alloc(u8, src.len);
     mem.copy(u8, dest, src);
     return dest;
@@ -460,12 +448,12 @@ fn zigzag_decode_64(src: u64) i64 {
     if (src & 1 != 0) return -@intCast(i64, (src >> 1)) - 1 else return @intCast(i64, (src >> 1));
 }
 
-fn read_var_i64(reader : anytype) !i64 {
-    var i : u32 = 0;
-    var ans : i64 = 0;
-    while (i < 8) : (i+=1) {
+fn read_var_i64(reader: anytype) !i64 {
+    var i: u32 = 0;
+    var ans: i64 = 0;
+    while (i < 8) : (i += 1) {
         const byte = try reader.readByte();
-        ans |= @intCast(i64,(byte & 0b0111_1111)) << 7 * i;
+        ans |= @intCast(i64, (byte & 0b0111_1111)) << 7 * i;
         if (byte & 0b1000_0000 == 0) {
             break;
         }
@@ -473,12 +461,12 @@ fn read_var_i64(reader : anytype) !i64 {
     return ans;
 }
 
-fn read_var_i32(reader : anytype) !i32 {
-    var i : u5 = 0;
-    var ans : i32 = 0;
-    while (i < 4) : (i+=1) {
+fn read_var_i32(reader: anytype) !i32 {
+    var i: u5 = 0;
+    var ans: i32 = 0;
+    while (i < 4) : (i += 1) {
         const byte = try reader.readByte();
-        ans |= @intCast(i32,(byte & 0b0111_1111)) << 7 * i;
+        ans |= @intCast(i32, (byte & 0b0111_1111)) << 7 * i;
         if (byte & 0b1000_0000 == 0) {
             break;
         }
@@ -486,35 +474,35 @@ fn read_var_i32(reader : anytype) !i32 {
     return ans;
 }
 
-fn read_var_u64(reader : anytype) !u64 {
+fn read_var_u64(reader: anytype) !u64 {
     return zigzag_encode_64(try read_var_i64(reader));
 }
 
-fn read_var_u32(reader : anytype) !u32 {
+fn read_var_u32(reader: anytype) !u32 {
     return zigzag_encode_32(try read_var_i32(reader));
 }
 
 // This is a terrible function to parse pkix key.
 // But it's fast and simple :).
-fn parse_pkix_key(pem : []const u8) !P384 {
-    var key : [120]u8 = [_]u8{0x0} ** 120;
+fn parse_pkix_key(pem: []const u8) !P384 {
+    var key: [120]u8 = [_]u8{0x0} ** 120;
     try std.base64.standard.Decoder.decode(key[0..key.len], pem);
-    const identifier : [24]u8 = .{ 0x30, 0x76, 0x30, 0x10, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22, 0x03, 0x62, 0x00, 0x04 };
-    if (!mem.eql(u8, identifier[0..identifier.len] , key[0..24])) {
+    const identifier: [24]u8 = .{ 0x30, 0x76, 0x30, 0x10, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22, 0x03, 0x62, 0x00, 0x04 };
+    if (!mem.eql(u8, identifier[0..identifier.len], key[0..24])) {
         @panic("TODO : return error");
     }
 
-    var x : [48]u8 = [_]u8{0x0} ** 48;
+    var x: [48]u8 = [_]u8{0x0} ** 48;
     @memcpy(&x, key[24..72], 48);
-    var y : [48]u8 = [_]u8{0x0} ** 48;
+    var y: [48]u8 = [_]u8{0x0} ** 48;
     @memcpy(&y, key[72..key.len], 48);
     return try P384.fromSerializedAffineCoordinates(x, y, .Big);
 }
 
 // return der
-fn encode_pkix_key(key : P384) [120]u8 {
-    var der : [120]u8 = [_]u8{0x0} ** 120;
-    const identifier : [24]u8 = .{ 0x30, 0x76, 0x30, 0x10, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22, 0x03, 0x62, 0x00, 0x04 };
+fn encode_pkix_key(key: P384) [120]u8 {
+    var der: [120]u8 = [_]u8{0x0} ** 120;
+    const identifier: [24]u8 = .{ 0x30, 0x76, 0x30, 0x10, 0x06, 0x07, 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01, 0x06, 0x05, 0x2B, 0x81, 0x04, 0x00, 0x22, 0x03, 0x62, 0x00, 0x04 };
     @memcpy(&der, &identifier, 24);
     @memcpy(der[24..], &key.x.toBytes(.Big), 48);
     @memcpy(der[72..], &key.y.toBytes(.Big), 48);
