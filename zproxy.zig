@@ -122,6 +122,17 @@ fn handle_mcpe(data: []u8) !void {
                 defer allocator.free(jwt_chain);
                 std.debug.assert((try cursor.read(jwt_chain)) == jwt_chain_len);
 
+                const player_data_len = try cursor.readIntLittle(u32);
+                std.debug.print("player data jwt len : {!}\n", .{player_data_len});
+
+                const player_data_jwt = try allocator.alloc(u8, player_data_len);
+                defer allocator.free(player_data_jwt);
+                std.debug.assert((try cursor.read(player_data_jwt)) == player_data_len);
+
+                const claims_start = mem.indexOfScalar(u8, player_data_jwt, '.').? + 1;
+                const claims_end = mem.indexOfScalar(u8, player_data_jwt[claims_start..], '.').?;
+                const claims = player_data_jwt[claims_start..claims_end];
+
                 const JwtChain = struct { chain: [][]u8 };
 
                 var jwts_ts = json.TokenStream.init(jwt_chain);
@@ -191,11 +202,24 @@ fn handle_mcpe(data: []u8) !void {
 
                         const skey = try EcdsaP384Sha384.SecretKey.fromBytes(secret);
                         const key_pair = try EcdsaP384Sha384.KeyPair.fromSecretKey(skey);
-                        const sign = try key_pair.sign(jwt_dst[header_b64_len + claims_b64_len + 1 ..], null);
+                        const sign = try key_pair.sign(jwt_dst[0..header_b64_len + claims_b64_len + 1], null);
 
                         _ = urlsafe_nopad.Encoder.encode(jwt_dst[header_b64_len + claims_b64_len + 2 ..], sign.toBytes()[0..96]);
 
-                        std.debug.print("{s}\n", .{jwt_dst});
+                        //std.debug.print("{s}\n", .{jwt_dst});
+
+                        const player_data_claims_dst = try allocator.alloc(u8, header_b64_len + claims.len + urlsafe_nopad.Encoder.calcSize(96) + 2);
+                        defer allocator.free(player_data_claims_dst);
+
+                        _ = urlsafe_nopad.Encoder.encode(player_data_claims_dst, header_json);
+                        player_data_claims_dst[header_b64_len] = '.';
+                        mem.copy(u8, player_data_claims_dst[header_b64_len + 1..], claims);
+                        player_data_claims_dst[header_b64_len + claims.len + 1] = '.';
+                        
+                        const player_data_sign = try key_pair.sign(player_data_claims_dst[0..header_b64_len + claims.len + 1], null);
+
+                        _ = urlsafe_nopad.Encoder.encode(player_data_claims_dst[header_b64_len + claims.len + 2 ..], player_data_sign.toBytes()[0..96]);
+                        //std.debug.print("{s}\n", .{player_data_claims_dst});
                     }
                 }
             },
@@ -203,88 +227,6 @@ fn handle_mcpe(data: []u8) !void {
         }
     }
 }
-
-// No verification. Because it's annoying.
-// We trust the clients we connect with.
-// TODO : verify
-const Jwt = struct {
-    pub const ExtraData = struct {
-        xuid: []const u8,
-        identity: []const u8,
-        display_name: []const u8,
-        title_id: []const u8,
-    };
-
-    allocator: mem.Allocator,
-    x5u: []const u8,
-    identity_public_key: []const u8,
-    extra_data: ?ExtraData,
-
-    nbf: i64,
-    exp: i64,
-
-    const Self = @This();
-
-    pub fn init(str: []u8, allocator: std.mem.Allocator) !Self {
-        // Split token with '.'.
-        const header_end = mem.indexOfScalar(u8, str, '.').?;
-        const claims_end = mem.indexOfScalarPos(u8, str, header_end + 1, '.').?;
-
-        const header_b64 = str[0..header_end];
-        const claims_b64 = str[header_end + 1 .. claims_end];
-
-        // Decode token.
-        var header_json_str = try allocator.alloc(u8, try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(header_b64));
-        defer allocator.free(header_json_str);
-        try std.base64.url_safe_no_pad.Decoder.decode(header_json_str, header_b64);
-
-        var claims_json_str = try allocator.alloc(u8, try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(claims_b64));
-        defer allocator.free(claims_json_str);
-        try std.base64.url_safe_no_pad.Decoder.decode(claims_json_str, claims_b64);
-
-        // Parse strings to json.
-        var parser = json.Parser.init(allocator, false);
-        parser.deinit();
-
-        var parser2 = json.Parser.init(allocator, false);
-        parser2.deinit();
-
-        var header = try parser.parse(header_json_str);
-        defer header.deinit();
-        var claims = try parser2.parse(claims_json_str);
-        defer claims.deinit();
-
-        // Allocate memory and copy.
-        var x5u = try copy_string(header.root.Object.get("x5u").?.String, allocator);
-        var identity_public_key = try copy_string(claims.root.Object.get("identityPublicKey").?.String, allocator);
-
-        const extra = claims.root.Object.get("extraData");
-        const extra_data = if (extra != null)
-            ExtraData{
-                .xuid = try copy_string(extra.?.Object.get("XUID").?.String, allocator),
-                .identity = try copy_string(extra.?.Object.get("identity").?.String, allocator),
-                .display_name = try copy_string(extra.?.Object.get("displayName").?.String, allocator),
-                .title_id = try copy_string(extra.?.Object.get("titleId").?.String, allocator),
-            }
-        else
-            null;
-
-        const nbf = claims.root.Object.get("nbf").?.Integer;
-        const exp = claims.root.Object.get("exp").?.Integer;
-        return Self{ .allocator = allocator, .x5u = x5u, .identity_public_key = identity_public_key, .extra_data = extra_data, .nbf = nbf, .exp = exp };
-    }
-
-    pub fn deinit(self: *Self) void {
-        self.allocator.free(self.x5u);
-        self.allocator.free(self.identity_public_key);
-        if (self.extra_data != null) {
-            self.allocator.free(self.extra_data.?.xuid);
-            self.allocator.free(self.extra_data.?.identity);
-            self.allocator.free(self.extra_data.?.display_name);
-            self.allocator.free(self.extra_data.?.title_id);
-        }
-    }
-};
 
 fn dialer_loop(dialer: *Dialer, listener: *Listener, handler: HandleFn) !void {
     //var dialer_seq = 0;
@@ -386,7 +328,7 @@ pub const Fragment = struct {
         }
 
         self.fragment.?[info.index] = try self.allocator.alloc(u8, payload.len);
-        mem.copy(u8, self.fragment.?[info.index].?, @as([]const u8, payload));
+        mem.copy(u8, self.fragment.?[info.index].?, payload);
 
         // Check if all packets have been received
         var total_len: usize = 0;
@@ -400,7 +342,7 @@ pub const Fragment = struct {
         var packet = try self.allocator.alloc(u8, total_len);
         var pos: usize = 0;
         for (self.fragment.?) |data| {
-            mem.copy(u8, packet[pos..], @as([]const u8, data.?));
+            mem.copy(u8, packet[pos..], data.?);
             self.allocator.free(data.?);
             pos += data.?.len;
         }
@@ -412,6 +354,88 @@ pub const Fragment = struct {
         self.size = null;
 
         return packet;
+    }
+};
+
+// No verification. Because it's annoying.
+// We trust the clients we connect with.
+// TODO : verify
+const Jwt = struct {
+    pub const ExtraData = struct {
+        xuid: []const u8,
+        identity: []const u8,
+        display_name: []const u8,
+        title_id: []const u8,
+    };
+
+    allocator: mem.Allocator,
+    x5u: []const u8,
+    identity_public_key: []const u8,
+    extra_data: ?ExtraData,
+
+    nbf: i64,
+    exp: i64,
+
+    const Self = @This();
+
+    pub fn init(str: []u8, allocator: std.mem.Allocator) !Self {
+        // Split token with '.'.
+        const header_end = mem.indexOfScalar(u8, str, '.').?;
+        const claims_end = mem.indexOfScalarPos(u8, str, header_end + 1, '.').?;
+
+        const header_b64 = str[0..header_end];
+        const claims_b64 = str[header_end + 1 .. claims_end];
+
+        // Decode token.
+        var header_json_str = try allocator.alloc(u8, try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(header_b64));
+        defer allocator.free(header_json_str);
+        try std.base64.url_safe_no_pad.Decoder.decode(header_json_str, header_b64);
+
+        var claims_json_str = try allocator.alloc(u8, try std.base64.url_safe_no_pad.Decoder.calcSizeForSlice(claims_b64));
+        defer allocator.free(claims_json_str);
+        try std.base64.url_safe_no_pad.Decoder.decode(claims_json_str, claims_b64);
+
+        // Parse strings to json.
+        var parser = json.Parser.init(allocator, false);
+        parser.deinit();
+
+        var parser2 = json.Parser.init(allocator, false);
+        parser2.deinit();
+
+        var header = try parser.parse(header_json_str);
+        defer header.deinit();
+        var claims = try parser2.parse(claims_json_str);
+        defer claims.deinit();
+
+        // Allocate memory and copy.
+        var x5u = try copy_string(header.root.Object.get("x5u").?.String, allocator);
+        var identity_public_key = try copy_string(claims.root.Object.get("identityPublicKey").?.String, allocator);
+
+        const extra = claims.root.Object.get("extraData");
+        const extra_data = if (extra != null)
+            ExtraData{
+                .xuid = try copy_string(extra.?.Object.get("XUID").?.String, allocator),
+                .identity = try copy_string(extra.?.Object.get("identity").?.String, allocator),
+                .display_name = try copy_string(extra.?.Object.get("displayName").?.String, allocator),
+                .title_id = try copy_string(extra.?.Object.get("titleId").?.String, allocator),
+            }
+        else
+            null;
+
+        const nbf = claims.root.Object.get("nbf").?.Integer;
+        const exp = claims.root.Object.get("exp").?.Integer;
+        return Self{ .allocator = allocator, .x5u = x5u, .identity_public_key = identity_public_key, .extra_data = extra_data, .nbf = nbf, .exp = exp };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.allocator.free(self.x5u);
+        self.allocator.free(self.identity_public_key);
+        if (self.extra_data != null) {
+            self.allocator.free(self.extra_data.?.xuid);
+            self.allocator.free(self.extra_data.?.identity);
+            self.allocator.free(self.extra_data.?.display_name);
+            self.allocator.free(self.extra_data.?.title_id);
+        }
     }
 };
 
