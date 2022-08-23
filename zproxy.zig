@@ -215,7 +215,7 @@ fn handle_mcpe(data: []u8) !void {
                         player_data_claims_dst[header_b64_len] = '.';
                         mem.copy(u8, player_data_claims_dst[header_b64_len + 1..], claims);
                         player_data_claims_dst[header_b64_len + claims.len + 1] = '.';
-                        
+
                         const player_data_sign = try key_pair.sign(player_data_claims_dst[0..header_b64_len + claims.len + 1], null);
 
                         _ = urlsafe_nopad.Encoder.encode(player_data_claims_dst[header_b64_len + claims.len + 2 ..], player_data_sign.toBytes()[0..96]);
@@ -246,7 +246,7 @@ pub const Dialer = struct {
 
     const Self = @This();
 
-    pub fn recv(self: *Self, data: []u8) !usize {
+    pub fn recv(self: Self, data: []u8) !usize {
         while (true) {
             const recv_from = try self.socket.receiveFrom(data);
             if (!recv_from.sender.address.eql(self.target.address) and recv_from.sender.port == self.target.port) continue;
@@ -254,8 +254,32 @@ pub const Dialer = struct {
         }
     }
 
-    pub fn send(self: *Self, data: []const u8) !usize {
+    pub fn send(self: Self, data: []const u8) !usize {
         return try self.socket.sendTo(self.target, data);
+    }
+
+    pub fn login(protocol_version : u32, jwt : []const u8, player_data : []const u8, allocator : mem.Allocator) void {
+        const chain = try json.stringifyAlloc(.{.chain=[_][]const u8{jwt}},null);
+        defer allocator.free(chain);
+
+        const strings_len = chain.len + player_data.len + @sizeOf(u32) * 2;
+
+        var buffer = std.ArrayList(u8).init(allocator);
+        defer buffer.deinit();
+
+        // MCPE packet identifier
+        buffer.writer().writeByte(0xfe);
+        
+        var compressor = try std.compress.deflate.compressor(allocator, buffer.writer(), .{.level = .level_7});
+        defer compressor.deinit();
+
+        try compressor.writer().writeByte(LoginPacket);
+        try compressor.writer().writeIntBig(u32, protocol_version);
+        try write_var_u32(compressor.writer(), strings_len);
+        try compressor.writer().writeIntLittle(u32, chain.len);
+        try compressor.writer().writeAll(chain);
+        try compressor.writer().writeIntLittle(u32, player_data);
+        try compressor.writer().writeAll(player_data);
     }
 };
 
@@ -275,7 +299,7 @@ pub const Listener = struct {
         }
     }
 
-    pub fn send(self: *Self, data: []const u8) !usize {
+    pub fn send(self: Self, data: []const u8) !usize {
         if (self.client == null) return error.NotConnected;
         return try self.socket.sendTo(self.client.?, data);
     }
@@ -314,7 +338,7 @@ pub const Fragment = struct {
     pub fn receive_fragment(self: *Self, info: FragmentInfo, payload: []u8) !?[]u8 {
         // Return error if the split size is biggger than maximum split size.
         if (info.compound_size > 256) {
-            //TODO : return error
+            @panic("TODO : return error");
         }
 
         if (self.fragment == null) {
@@ -324,7 +348,7 @@ pub const Fragment = struct {
         }
 
         if (info.compound_id != self.id.? or info.index > self.size.? - 1) {
-            //TODO : return error
+            @panic("TODO : return error");
         }
 
         self.fragment.?[info.index] = try self.allocator.alloc(u8, payload.len);
@@ -505,6 +529,65 @@ fn read_var_u64(reader: anytype) !u64 {
 fn read_var_u32(reader: anytype) !u32 {
     return zigzag_encode_32(try read_var_i32(reader));
 }
+
+fn var_i32_len(v : i32) usize {
+    var cnt = 0;
+    while (v != 0) {
+        v = (v >> 7) & (std.math.maxInt(i32) >> 6);
+        cnt += 1;
+    }
+    return cnt;
+}
+
+fn var_i64_len(v : i32) usize {
+    var cnt = 0;
+    while (v != 0) {
+        v = (v >> 7) & (std.math.maxInt(i64) >> 6);
+        cnt += 1;
+    }
+    return cnt;
+}
+
+fn var_u32_len(v : u32) usize {
+    return var_i32_len(zigzag_decode_32(v));
+}
+
+fn var_u64_len(v : u64) usize {
+    return var_i64_len(zigzag_decode_64(v));
+}
+
+fn write_var_i32(writer: anytype, v: i32) !void {
+    var byte = 0;
+    while (v != 0) {
+        byte = @intCast(u8, v & 0b0111_1111);
+        v = (v >> 7) & (std.math.maxInt(i32) >> 6);
+        if (v != 0) {
+            byte |= 0b1000_0000;
+        }
+        try writer.writeByte(byte);
+    }
+}
+
+fn write_var_i64(writer : anytype, v: i64) !void {
+    var byte = 0;
+    while (v != 0) {
+        byte = @intCast(u8, v & 0b0111_1111);
+        v = (v >> 7) & (std.math.maxInt(i64) >> 6);
+        if (v != 0) {
+            byte |= 0b1000_0000;
+        }
+        try writer.writeByte(byte);
+    }
+}
+
+fn write_var_u32(writer : anytype, v : u64) !void {
+    try write_var_i32(writer, zigzag_decode_32(v));
+}
+
+fn writer_var_u64(writer : anytype, v : u64) !void {
+    try write_var_i64(writer, zigzag_decode_64(v));
+}
+
 
 // This is a terrible function to parse pkix key.
 // But it's fast and simple :).
